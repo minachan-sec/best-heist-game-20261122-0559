@@ -1,66 +1,70 @@
-// Every tuning number, colour and level in one place. The playfield is a fixed 1280x720
-// logical area (32x18 tiles of 40px); the renderer scales it to the window, so no rule
-// below depends on the screen size. VAULTBREAK is a top-down heist game: slip past
-// patrolling guards and sweeping security cameras, use shadows and display cases for
-// cover, grab the loot and reach the getaway van before the alarm meter maxes out.
+// VAULTBREAK tuning, palette and levels. Everything the game balances on lives
+// here so a single file answers "how fast", "how far can they see" and "what does
+// the room look like".
+//
+// The room is a fixed 1280x720 logical field (32 by 18 tiles of 40px). The renderer
+// scales that field to the window, so no rule below cares about screen size.
+// You are the thief: slip past patrolling guards and sweeping wall cameras, hide
+// in shadows, duck behind display cases, grab every haul and reach the getaway
+// van before the alarm meter fills and locks the building down.
 
 export const FIELD = { width: 1280, height: 720 };
 export const TILE = 40;
 export const COLS = 32;
 export const ROWS = 18;
 
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
+// One fixed simulation step per second: 60 ticks a second, whatever the display does.
 export const STEP = 1 / 60;
 
 export const PLAYER = {
   radius: 13,
   sneakSpeed: 168,
   runSpeed: 305,
-  /** Running is loud: guards this close hear the footsteps and come looking. */
+  // Running is loud: any guard this close hears the footsteps and comes to look.
   noiseRadius: 175,
-  /** How often running feet make a noise pulse, in seconds. */
+  // Seconds between one running footstep noise pulse and the next.
   noiseInterval: 0.45,
 };
 
 export const GUARD = {
   radius: 13,
-  /** How far a guard can see, in pixels. */
+  // How far a guard can see, in pixels.
   viewRange: 245,
-  /** Vision cone width, in radians (about 78 degrees). */
+  // Vision cone width in radians (about 78 degrees).
   viewAngle: 1.36,
   patrolSpeed: 72,
   chaseSpeed: 205,
   investigateSpeed: 130,
-  /** Seconds a guard stares at a waypoint before moving on. */
+  // Seconds a guard waits at a waypoint before walking on.
   pauseAtWaypoint: 1.1,
-  /** Suspicion gained per second while the player is dead-centre, point blank. */
+  // Suspicion gained per second while the thief is dead-centre and point blank.
   detectRate: 1.5,
-  /** Suspicion lost per second while the player is unseen. */
+  // Suspicion lost per second while the thief is out of sight.
   forgetRate: 0.55,
-  /** Inside a shadow the player is hidden unless a guard gets this close. */
+  // Hidden in a shadow, the thief is invisible unless a guard gets this close.
   shadowSpotRange: 46,
-  /** Seconds a guard searches the last known position before giving up. */
+  // Seconds a guard searches the last known position before giving up.
   searchTime: 4,
-  /** Seconds a guard stares at a noise point before going back on patrol. */
+  // Seconds a guard stares at a noise point before going back on patrol.
   inspectTime: 2.2,
 };
 
 export const CAMERA = {
   radius: 10,
-  /** How far a camera can see, in pixels. */
+  // How far a camera can see, in pixels.
   viewRange: 230,
-  /** Camera cone width, in radians (about 54 degrees). */
+  // Camera cone width in radians (about 54 degrees).
   viewAngle: 0.95,
-  /** Alarm gained per second while the player is dead-centre, point blank. */
+  // Alarm gained per second while the thief is dead-centre and point blank.
   detectRate: 1.15,
-  /** Alarm lost per second while the player is unseen by every camera. */
+  // Alarm drained per second while no camera sees the thief.
   forgetRate: 0.12,
-  /** Inside a shadow the player is hidden unless a camera gets this close. */
+  // Hidden in a shadow, the thief is invisible unless a camera gets this close.
   shadowSpotRange: 40,
 };
 
 export const COIN = {
-  /** Coins per level. A click throws one to the clicked point; guards go look at it. */
+  // Coins per level. Click to throw one at a point; guards go and look at it.
   perLevel: 3,
   throwRange: 340,
   flightTime: 0.35,
@@ -112,12 +116,13 @@ export const PALETTE = {
 
 export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
-/** Where the best score is kept between visits (this browser only). */
+// Where the best score lives between visits (this browser only).
 export const BEST_KEY = 'vaultbreak.best';
 
-// Level maps: 32 columns x 18 rows.
-// '#' wall   '.' floor   'S' shadow (hide in it)   'C' display case (cover, blocks sight)
-// 'P' player start   'L' loot   'E' getaway van   Guards and cameras are listed per level.
+// Level maps, 32 columns by 18 rows.
+//   '#' wall   '.' floor   'S' shadow (hide in it)   'C' display case (cover, blocks sight)
+//   'P' thief start   'L' loot   'E' getaway van
+// Guards and cameras are listed per level below their map.
 export const LEVELS = [
   {
     name: '1 · The Lobby',

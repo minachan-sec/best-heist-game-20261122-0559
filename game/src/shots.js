@@ -1,7 +1,7 @@
-// The screenshot scenes behind ?shot=start|play|close|end. Each one plays the real
-// rules forward from a fresh world, steered by a waypoint autopilot that sneaks, waits
-// out patrols and hides in shadows, so every frame is what a real game looks like and
-// the same seed always gives the same frame.
+// The screenshot scenes behind ?shot=start|play|close|end. Each one plays the
+// real rules forward from a fresh world, steered by a waypoint autopilot that
+// sneaks, waits out patrols and hides in shadows, so every frame is what a real
+// game looks like and the same seed always gives the same frame.
 import { FIELD, PLAYER, STEP, TILE } from './config.js';
 import { EVENT_CAUGHT, EVENT_CLEAR, findPath } from './world.js';
 import { SCREEN_CLEAR, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
@@ -9,7 +9,7 @@ import { SCREEN_CLEAR, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 const START_SECONDS = 6;
 const MAX_SECONDS = 150;
 
-/** Drive the player along BFS paths through `tiles`, waiting when a guard looks close. */
+// Drive the thief along BFS paths through `tiles`, waiting when a guard looks close.
 function drive(world, tiles, seconds, stopWhen) {
   const state = world.state;
   let leg = 0;
@@ -52,7 +52,7 @@ function drive(world, tiles, seconds, stopWhen) {
   return leg >= tiles.length;
 }
 
-/** Idle the world forward, guards patrolling, player standing still. */
+// Idle the world forward, guards patrolling, thief standing still.
 function idle(world, seconds, stopWhen) {
   for (let t = 0; t < seconds / STEP; t += 1) {
     if (stopWhen && stopWhen(world.state)) return true;
@@ -62,12 +62,10 @@ function idle(world, seconds, stopWhen) {
   return true;
 }
 
-/**
- * Set `world` to the named scene and return the screen to draw over it and the best
- * score to show. start: title over a live lobby. play: mid-sneak, hidden in a shadow
- * as a guard sweeps past. close: a near miss, the alarm meter half full. end: the
- * first level cleared.
- */
+// Set `world` to the named scene and return the screen to draw over it and the
+// best score to show. start: title over a live lobby. play: mid-sneak, hidden in
+// a shadow as a guard sweeps past. close: a near miss, the alarm meter half full.
+// end: the first level cleared.
 export function stageShot(name, world) {
   world.reset();
   if (name === 'play') {

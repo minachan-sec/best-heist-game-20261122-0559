@@ -35,7 +35,7 @@ export function createRenderer(canvas) {
   resize();
   window.addEventListener('resize', resize);
 
-  /** Convert a client (mouse) point to field coordinates. */
+  // Convert a client (mouse) point to field coordinates.
   function toField(clientX, clientY) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = canvas.getBoundingClientRect();
@@ -50,7 +50,8 @@ export function createRenderer(canvas) {
     return chars.includes(level.map[ty][tx]);
   }
 
-  /** A vision cone as a polygon: rays fanned across the field of view, each stopped by a wall. */
+  // A vision cone as a polygon: rays fanned across the field of view, each
+  // stopped by the first wall or display case it meets.
   function conePolygon(level, x, y, angle, viewAngle, viewRange) {
     const points = [];
     for (let i = 0; i <= CONE_RAYS; i += 1) {
@@ -110,7 +111,7 @@ export function createRenderer(canvas) {
         }
       }
     }
-    // The getaway van: red and barred while the loot is not all taken, green once open.
+    // The getaway van: red and barred while loot is still out there, green once open.
     const e = state.exit;
     ctx.save();
     ctx.translate(e.x, e.y);
@@ -219,7 +220,7 @@ export function createRenderer(canvas) {
       ctx.closePath();
       ctx.fill();
       ctx.restore();
-      // A blinking red dot while the camera has the player in frame.
+      // A blinking red dot while the camera has the thief in frame.
       if (cam.seeing > 0) {
         ctx.save();
         ctx.translate(cam.ox, cam.oy - 20);
@@ -357,7 +358,7 @@ export function createRenderer(canvas) {
     ctx.font = `700 17px ${FONT}`;
     ctx.fillText('♥'.repeat(state.lives) + '♡'.repeat(Math.max(0, 3 - state.lives)), FIELD.width - 14, 23);
     // The alarm meter: a labelled bar that fills as guards grow suspicious or a
-    // camera holds the player in frame. Full means lockdown — every guard hunts.
+    // camera holds the thief in frame. Full means lockdown — every guard hunts.
     const bx = FIELD.width - 210;
     const by = 58;
     ctx.textAlign = 'left';

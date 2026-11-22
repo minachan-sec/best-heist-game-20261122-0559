@@ -1,7 +1,7 @@
 // Keyboard and pointer input. WASD or arrows steer in two dimensions, Shift runs
 // (fast, loud), and a mouse click throws a distraction coin at the clicked point.
-// One-shot presses (confirm, pause, mute) are queued as bit flags and taken once by
-// the loop, so a press between two frames is never lost and never counted twice.
+// One-shot presses (confirm, pause, mute) are queued as bit flags and taken once
+// by the loop, so a press between two frames is never lost and never counted twice.
 
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
@@ -53,7 +53,7 @@ export function createInput(target, toField) {
   });
 
   return {
-    /** Steering vector, each component in -1..1. */
+    // Steering vector, each component in -1..1.
     move() {
       return {
         x: (keys.right ? 1 : 0) - (keys.left ? 1 : 0),
@@ -63,13 +63,13 @@ export function createInput(target, toField) {
     running() {
       return keys.run;
     },
-    /** The field point of the last click, once, or null. */
+    // The field point of the last click, once, or null.
     takeThrow() {
       const taken = throwAt;
       throwAt = null;
       return taken;
     },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
+    // The one-shot presses since the last call, as ACTION_* flags.
     takeActions() {
       const taken = actions;
       actions = 0;

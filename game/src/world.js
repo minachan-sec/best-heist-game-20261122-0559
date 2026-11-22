@@ -1,9 +1,12 @@
-// The game world: the level map, the player, the guards and their senses, the wall
-// cameras and their sweeping cones, coins, loot and the getaway van. The simulation
-// runs in fixed STEP slices; step() returns a bitmask of events the loop reacts to
-// (pickup, caught, level clear, game over, lockdown).
+// The world: the level map, the thief, the guards and their senses, the wall
+// cameras and their sweeping cones, coins, loot and the getaway van.
+//
+// The simulation ticks in fixed STEP slices. step() takes the player's steering
+// for that slice and returns a bitmask of events the main loop reacts to
+// (loot taken, caught, level clear, game over, lockdown...).
 import { CAMERA, COIN, COLS, FIELD, GUARD, LEVELS, LIVES, PLAYER, ROWS, SCORE, STEP, TILE } from './config.js';
 
+// Event flags returned by step().
 export const EVENT_NONE = 0;
 export const EVENT_LOOT = 1;
 export const EVENT_CAUGHT = 2;
@@ -14,6 +17,7 @@ export const EVENT_COIN = 32;
 export const EVENT_SPOTTED = 64;
 export const EVENT_LOCKDOWN = 128;
 
+// Guard states.
 export const G_PATROL = 0;
 export const G_SUSPICIOUS = 1;
 export const G_ALERT = 2;
@@ -31,7 +35,7 @@ function isWall(level, px, py) {
   return !WALKABLE.has(tileAt(level, Math.floor(px / TILE), Math.floor(py / TILE)));
 }
 
-/** True when the segment between two points crosses no wall or display case. */
+// True when the straight line between two points crosses no wall or display case.
 export function losClear(level, x0, y0, x1, y1) {
   const dx = x1 - x0;
   const dy = y1 - y0;
@@ -44,15 +48,15 @@ export function losClear(level, x0, y0, x1, y1) {
   return true;
 }
 
-/** Breadth-first path over walkable tiles, as a list of pixel centres. */
+// Breadth-first path over walkable tiles, as a list of pixel centres to walk through.
 export function findPath(level, fromX, fromY, toX, toY) {
   const sx = Math.floor(fromX / TILE);
   const sy = Math.floor(fromY / TILE);
   const tx = Math.floor(toX / TILE);
   const ty = Math.floor(toY / TILE);
   if (sx === tx && sy === ty) return [{ x: toX, y: toY }];
-  const prev = new Map();
   const key = (x, y) => y * COLS + x;
+  const prev = new Map();
   const queue = [[sx, sy]];
   prev.set(key(sx, sy), null);
   while (queue.length > 0) {
@@ -79,6 +83,7 @@ export function findPath(level, fromX, fromY, toX, toY) {
   return tiles.slice(1).map(([x, y]) => ({ x: x * TILE + TILE / 2, y: y * TILE + TILE / 2 }));
 }
 
+// Pull the thief start, loot spots and van out of a level's map strings.
 function parseLevel(def) {
   const player = { x: 0, y: 0 };
   const loot = [];
@@ -116,9 +121,9 @@ export function createWorld(random) {
     caught: false,
     cleared: false,
     won: false,
-    /** Highest suspicion across guards, 0..1: part of what the HUD alarm meter shows. */
+    // Highest suspicion across all guards, 0..1: half of what the HUD alarm bar shows.
     alarm: 0,
-    /** The camera alarm, 0..1: fills while any camera sees the player. */
+    // The camera alarm, 0..1: fills while any camera holds the thief in frame.
     camAlarm: 0,
     shake: 0,
   };
@@ -131,7 +136,7 @@ export function createWorld(random) {
     state.player.x = parsed.player.x;
     state.player.y = parsed.player.y;
     state.player.face = 0;
-    state.loot = parsed.loot.map((i) => ({ ...i }));
+    state.loot = parsed.loot.map((item) => ({ ...item }));
     state.exit = parsed.exit;
     state.exitOpen = false;
     state.coins = COIN.perLevel;
@@ -146,8 +151,8 @@ export function createWorld(random) {
     state.cameras = (def.cameras ?? []).map((c) => ({
       x: c.tx * TILE + TILE / 2,
       y: c.ty * TILE + TILE / 2,
-      // The cone's origin sits at the wall tile's room-side edge: a cone cast from
-      // the wall tile's centre would stop on its own wall at once.
+      // The cone starts at the wall tile's room-side edge: a cone cast from the
+      // wall tile's centre would stop on its own wall immediately.
       ox: c.tx * TILE + TILE / 2,
       oy: c.base > 0 ? c.ty * TILE + TILE - 4 : c.ty * TILE + 4,
       base: c.base,
@@ -184,28 +189,27 @@ export function createWorld(random) {
     loadLevel(0);
   }
 
-  /** Move a circle against walls and display cases, axis by axis so it slides along them. */
+  // Move a circle against walls and display cases, axis by axis, so it slides
+  // along them instead of sticking on corners.
   function moveCircle(body, dx, dy, radius) {
     const level = state.level;
     const nx = body.x + dx;
-    if (!isWall(level, nx - radius, body.y) && !isWall(level, nx + radius, body.y) &&
-        !isWall(level, nx - radius, body.y - radius * 0.7) && !isWall(level, nx + radius, body.y - radius * 0.7) &&
-        !isWall(level, nx - radius, body.y + radius * 0.7) && !isWall(level, nx + radius, body.y + radius * 0.7)) {
-      body.x = Math.max(radius, Math.min(FIELD.width - radius, nx));
-    }
+    const clearX = !isWall(level, nx - radius, body.y) && !isWall(level, nx + radius, body.y)
+      && !isWall(level, nx - radius, body.y - radius * 0.7) && !isWall(level, nx + radius, body.y - radius * 0.7)
+      && !isWall(level, nx - radius, body.y + radius * 0.7) && !isWall(level, nx + radius, body.y + radius * 0.7);
+    if (clearX) body.x = Math.max(radius, Math.min(FIELD.width - radius, nx));
     const ny = body.y + dy;
-    if (!isWall(level, body.x, ny - radius) && !isWall(level, body.x, ny + radius) &&
-        !isWall(level, body.x - radius * 0.7, ny - radius) && !isWall(level, body.x + radius * 0.7, ny - radius) &&
-        !isWall(level, body.x - radius * 0.7, ny + radius) && !isWall(level, body.x + radius * 0.7, ny + radius)) {
-      body.y = Math.max(radius, Math.min(FIELD.height - radius, ny));
-    }
+    const clearY = !isWall(level, body.x, ny - radius) && !isWall(level, body.x, ny + radius)
+      && !isWall(level, body.x - radius * 0.7, ny - radius) && !isWall(level, body.x + radius * 0.7, ny - radius)
+      && !isWall(level, body.x - radius * 0.7, ny + radius) && !isWall(level, body.x + radius * 0.7, ny + radius);
+    if (clearY) body.y = Math.max(radius, Math.min(FIELD.height - radius, ny));
   }
 
   function playerInShadow() {
     return tileAt(state.level, Math.floor(state.player.x / TILE), Math.floor(state.player.y / TILE)) === 'S';
   }
 
-  /** Can this guard see the player right now? Returns 0..1 (0 = not seen). */
+  // Can this guard see the thief right now? Returns 0..1, where 0 means not seen.
   function guardSees(guard) {
     const p = state.player;
     const dx = p.x - guard.x;
@@ -219,11 +223,11 @@ export function createWorld(random) {
     if (Math.abs(diff) > GUARD.viewAngle / 2) return 0;
     if (!losClear(state.level, guard.x, guard.y, p.x, p.y)) return 0;
     if (p.hidden && dist > GUARD.shadowSpotRange) return 0;
-    // Closer and more centred = seen more clearly.
+    // Closer and more centred reads as a clearer sighting.
     return (1 - dist / GUARD.viewRange) * 0.6 + 0.4;
   }
 
-  /** Can this camera see the player right now? Returns 0..1 (0 = not seen). */
+  // Can this camera see the thief right now? Returns 0..1, where 0 means not seen.
   function cameraSees(cam) {
     const p = state.player;
     const dx = p.x - cam.ox;
@@ -240,6 +244,7 @@ export function createWorld(random) {
     return (1 - dist / CAMERA.viewRange) * 0.6 + 0.4;
   }
 
+  // A noise at (x, y) pulls a guard over to look, unless it is already chasing.
   function hearNoise(guard, x, y, radius) {
     if (guard.state === G_ALERT) return;
     if (Math.hypot(x - guard.x, y - guard.y) > radius) return;
@@ -340,8 +345,8 @@ export function createWorld(random) {
     }
   }
 
-  /** Sweep every camera, grow the camera alarm while one sees the player, and trip a
-   * lockdown (every guard goes alert) when the meter fills. Returns true on lockdown. */
+  // Sweep every camera, grow the camera alarm while one sees the thief, and trip
+  // a lockdown (every guard goes alert) when the meter fills. Returns true on lockdown.
   function stepCameras(dt) {
     let seen = 0;
     for (const cam of state.cameras) {
@@ -370,10 +375,8 @@ export function createWorld(random) {
 
   let noiseTimer = 0;
 
-  /**
-   * Advance the world one fixed step. `move` is {x, y} in -1..1, `run` holds Shift,
-   * `throwAt` is a field point to throw a coin at (or null). Returns event flags.
-   */
+  // Advance the world one fixed step. `move` is {x, y} in -1..1, `run` holds Shift,
+  // `throwAt` is a field point to throw a coin at (or null). Returns event flags.
   function step(dt, move, run, throwAt) {
     if (state.caught || state.cleared || state.won) return EVENT_NONE;
     let events = EVENT_NONE;
@@ -448,7 +451,7 @@ export function createWorld(random) {
       stepGuard(g, dt);
       if (g.suspicion > before && g.suspicion > 0.5) spotted = true;
       maxAlarm = Math.max(maxAlarm, g.suspicion);
-      // A guard that reaches the player while fully alert catches them.
+      // A guard that reaches the thief while fully alert catches them.
       if (g.state === G_ALERT && Math.hypot(g.x - p.x, g.y - p.y) < GUARD.radius + PLAYER.radius + 4) {
         state.caught = true;
       }
@@ -487,12 +490,12 @@ export function createWorld(random) {
     return events;
   }
 
-  /** After being caught with lives left: restart the level, guards and all. */
+  // After being caught with lives left: restart the level, guards and all.
   function retryLevel() {
     loadLevel(state.levelIndex);
   }
 
-  /** After clearing a level: move to the next one. */
+  // After clearing a level: move on to the next one.
   function nextLevel() {
     if (state.levelIndex + 1 < LEVELS.length) loadLevel(state.levelIndex + 1);
   }

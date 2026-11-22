@@ -1,11 +1,11 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s
-// steps (several in a slow frame, none in a fast one), and the renderer paints what is
-// there. The game moves between seven screens: title, play, paused, caught, level
-// clear, game over and victory.
+// Boot and the one loop: input is read every frame, the world advances in fixed
+// 1/60 s steps (several in a slow frame, none in a fast one), and the renderer
+// paints what is there. The game moves between seven screens: title, play,
+// paused, caught, level clear, game over and victory.
 //
-// ?seed=N fixes the game. ?shot=start|play|close|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a
-// screenshot.
+// ?seed=N fixes the game. ?shot=start|play|close|end (with &seed=N) stages that
+// scene instead of running the loop, paints it twice and sets window.__shotReady
+// for a screenshot.
 import { BEST_KEY, LIVES, STEP } from './config.js';
 import { createRandom } from './random.js';
 import { createWorld, EVENT_CAUGHT, EVENT_CLEAR, EVENT_COIN, EVENT_LOCKDOWN, EVENT_LOOT, EVENT_OVER, EVENT_SPOTTED } from './world.js';
@@ -14,7 +14,7 @@ import { createRenderer, SCREEN_CAUGHT, SCREEN_CLEAR, SCREEN_OVER, SCREEN_PAUSED
 import { stageShot } from './shots.js';
 import { sound } from './audio.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
+// The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed.
 const MAX_FRAME = 0.25;
 
 const params = new URLSearchParams(window.location.search);

@@ -1,6 +1,6 @@
-// Tiny synthesized sound: every effect is an oscillator shaped in code, so the game
-// ships no audio files at all. Audio starts on the first user gesture (browsers
-// demand it) and M toggles it off.
+// Tiny synthesized sound: every effect is an oscillator shaped in code, so the
+// game ships no audio files at all. Audio starts on the first user gesture
+// (browsers demand it) and M toggles it off.
 
 let ctx = null;
 let muted = false;
@@ -39,7 +39,7 @@ function tone(freq, dur, type, when, slideTo) {
 }
 
 export const sound = {
-  /** Call on the first key or click so later effects can play. */
+  // Call on the first key or click so later effects can play.
   unlock() {
     if (ensure() && ctx.state === 'suspended') ctx.resume().catch(() => {});
   },
@@ -61,7 +61,7 @@ export const sound = {
   spotted() {
     tone(320, 0.22, 'sawtooth', 0, 520);
   },
-  /** The camera alarm trips: a rising two-tone siren. */
+  // The camera alarm trips: a rising two-tone siren.
   alarm() {
     tone(660, 0.18, 'square', 0, 880);
     tone(880, 0.18, 'square', 0.18, 660);

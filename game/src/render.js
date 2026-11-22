@@ -1,482 +1,362 @@
-// The renderer: a top-down night heist on one canvas. The playfield is a fixed
-// 1280x720 logical area scaled to the window; guards get vision cones clipped by
-// walls (a fan of rays, each marched until it hits something), cameras sweep cyan
-// cones across the floor, and the HUD shows the loot, the alarm meter and the level.
+// VAULTBREAK renderer — draws the whole heist on a 2D canvas in logical 960x600 space.
+// The caller sets the transform (scale + centering); everything here works in game pixels.
 
-import { CAMERA, COLS, FIELD, FONT, GUARD, PALETTE, ROWS, TILE } from './config.js';
-import { G_ALERT } from './world.js';
+import { SETTINGS, PALETTE } from './config.js';
+import { coneFan, tileCenter } from './world.js';
 
-export const SCREEN_TITLE = 0;
-export const SCREEN_PLAY = 1;
-export const SCREEN_PAUSED = 2;
-export const SCREEN_CAUGHT = 3;
-export const SCREEN_CLEAR = 4;
-export const SCREEN_OVER = 5;
-export const SCREEN_WIN = 6;
+const W = SETTINGS.viewWidth;
+const H = SETTINGS.viewHeight;
+const T = SETTINGS.tile;
 
-const CONE_RAYS = 26;
-
-export function createRenderer(canvas) {
-  const ctx = canvas.getContext('2d');
-  let scale = 1;
-  let offsetX = 0;
-  let offsetY = 0;
-
-  function resize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(w * dpr);
-    canvas.height = Math.floor(h * dpr);
-    scale = Math.min(w / FIELD.width, h / FIELD.height) * dpr;
-    offsetX = (w * dpr - FIELD.width * scale) / 2;
-    offsetY = (h * dpr - FIELD.height * scale) / 2;
-  }
-  resize();
-  window.addEventListener('resize', resize);
-
-  // Convert a client (mouse) point to field coordinates.
-  function toField(clientX, clientY) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: ((clientX - rect.left) * dpr - offsetX) / scale,
-      y: ((clientY - rect.top) * dpr - offsetY) / scale,
-    };
-  }
-
-  function tileIs(level, tx, ty, chars) {
-    if (tx < 0 || ty < 0 || tx >= COLS || ty >= ROWS) return false;
-    return chars.includes(level.map[ty][tx]);
-  }
-
-  // A vision cone as a polygon: rays fanned across the field of view, each
-  // stopped by the first wall or display case it meets.
-  function conePolygon(level, x, y, angle, viewAngle, viewRange) {
-    const points = [];
-    for (let i = 0; i <= CONE_RAYS; i += 1) {
-      const a = angle - viewAngle / 2 + (viewAngle * i) / CONE_RAYS;
-      let r = viewRange;
-      for (let d = 12; d <= viewRange; d += 8) {
-        const px = x + Math.cos(a) * d;
-        const py = y + Math.sin(a) * d;
-        if (tileIs(level, Math.floor(px / TILE), Math.floor(py / TILE), '#C')) {
-          r = d;
-          break;
-        }
-      }
-      points.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
-    }
-    return points;
-  }
-
-  function drawLevel(state) {
-    const level = state.level;
-    for (let y = 0; y < ROWS; y += 1) {
-      for (let x = 0; x < COLS; x += 1) {
-        const c = level.map[y][x];
-        const px = x * TILE;
-        const py = y * TILE;
-        ctx.fillStyle = (x + y) % 2 === 0 ? PALETTE.floorA : PALETTE.floorB;
-        ctx.fillRect(px, py, TILE, TILE);
-        if (c === '#') {
-          ctx.fillStyle = PALETTE.wall;
-          ctx.fillRect(px + 1, py + 1, TILE - 2, TILE - 2);
-          ctx.fillStyle = PALETTE.wallTop;
-          ctx.fillRect(px + 1, py + 1, TILE - 2, 7);
-          ctx.fillStyle = PALETTE.wallEdge;
-          ctx.fillRect(px + 1, py + TILE - 4, TILE - 2, 3);
-        } else if (c === 'C') {
-          ctx.fillStyle = PALETTE.crate;
-          ctx.fillRect(px + 5, py + 5, TILE - 10, TILE - 10);
-          ctx.fillStyle = PALETTE.crateTop;
-          ctx.fillRect(px + 5, py + 5, TILE - 10, 6);
-          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-          ctx.strokeRect(px + 5.5, py + 5.5, TILE - 11, TILE - 11);
-        } else if (c === 'S') {
-          ctx.fillStyle = PALETTE.shadow;
-          ctx.fillRect(px, py, TILE, TILE);
-          ctx.fillStyle = PALETTE.shadowLeaf;
-          ctx.beginPath();
-          ctx.arc(px + 12, py + 14, 9, 0, Math.PI * 2);
-          ctx.arc(px + 27, py + 11, 8, 0, Math.PI * 2);
-          ctx.arc(px + 20, py + 27, 9, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = PALETTE.shadowLeaf2;
-          ctx.beginPath();
-          ctx.arc(px + 12, py + 12, 4, 0, Math.PI * 2);
-          ctx.arc(px + 27, py + 9, 3.5, 0, Math.PI * 2);
-          ctx.arc(px + 20, py + 25, 4, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-    // The getaway van: red and barred while loot is still out there, green once open.
-    const e = state.exit;
-    ctx.save();
-    ctx.translate(e.x, e.y);
-    ctx.fillStyle = state.exitOpen ? PALETTE.exitOpen : PALETTE.exitLocked;
-    ctx.globalAlpha = 0.25 + 0.12 * Math.sin(state.time * 3);
-    ctx.beginPath();
-    ctx.arc(0, 0, 30, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    // Van body with a cab, two wheels and a door line.
-    ctx.fillStyle = state.exitOpen ? '#0d3a2c' : '#3a1210';
-    ctx.fillRect(-17, -13, 34, 26);
-    ctx.fillStyle = state.exitOpen ? PALETTE.exitOpen : PALETTE.exitLocked;
-    ctx.fillRect(-17, -13, 34, 5);
-    ctx.fillStyle = '#101418';
-    ctx.beginPath();
-    ctx.arc(-9, 14, 5, 0, Math.PI * 2);
-    ctx.arc(9, 14, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = `700 10px ${FONT}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(state.exitOpen ? 'VAN' : 'LOCK', 0, 1);
-    ctx.restore();
-    // Loot glows gold until taken: a stack of bars.
-    for (const item of state.loot) {
-      if (item.taken) continue;
-      ctx.save();
-      ctx.translate(item.x, item.y + Math.sin(state.time * 2.4 + item.x) * 2);
-      ctx.fillStyle = PALETTE.loot;
-      ctx.globalAlpha = 0.25;
-      ctx.beginPath();
-      ctx.arc(0, 0, 20, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#fff3c4';
-      ctx.fillRect(-11, -4, 22, 8);
-      ctx.fillStyle = PALETTE.loot;
-      ctx.fillRect(-11, -4, 22, 3);
-      ctx.fillStyle = '#8a7a2a';
-      ctx.fillRect(-8, 0, 16, 2);
-      ctx.fillStyle = '#fff3c4';
-      ctx.fillRect(-8, -9, 16, 5);
-      ctx.fillStyle = PALETTE.loot;
-      ctx.fillRect(-8, -9, 16, 2);
-      ctx.restore();
-    }
-  }
-
-  function drawCones(state) {
-    // Guard cones: amber while calm, red while alert.
-    for (const g of state.guards) {
-      const alert = g.state === G_ALERT || g.suspicion > 0.6;
-      const poly = conePolygon(state.level, g.x, g.y, g.angle, GUARD.viewAngle, GUARD.viewRange);
-      const grad = ctx.createRadialGradient(g.x, g.y, 10, g.x, g.y, GUARD.viewRange);
-      grad.addColorStop(0, alert ? 'rgba(229, 83, 75, 0.42)' : 'rgba(242, 201, 76, 0.30)');
-      grad.addColorStop(1, alert ? 'rgba(229, 83, 75, 0.06)' : 'rgba(242, 201, 76, 0.05)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(g.x, g.y);
-      for (const pt of poly) ctx.lineTo(pt.x, pt.y);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = alert ? PALETTE.coneAlertEdge : PALETTE.coneCalmEdge;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
-    // Camera cones: cyan, sweeping back and forth, cast from the wall's room-side edge.
-    for (const cam of state.cameras) {
-      const hot = cam.seeing > 0;
-      const poly = conePolygon(state.level, cam.ox, cam.oy, cam.angle, CAMERA.viewAngle, CAMERA.viewRange);
-      const grad = ctx.createRadialGradient(cam.ox, cam.oy, 8, cam.ox, cam.oy, CAMERA.viewRange);
-      grad.addColorStop(0, hot ? 'rgba(95, 212, 230, 0.45)' : 'rgba(95, 212, 230, 0.26)');
-      grad.addColorStop(1, 'rgba(95, 212, 230, 0.05)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(cam.ox, cam.oy);
-      for (const pt of poly) ctx.lineTo(pt.x, pt.y);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = PALETTE.cameraConeEdge;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
-  }
-
-  function drawCameras(state) {
-    for (const cam of state.cameras) {
-      ctx.save();
-      ctx.translate(cam.x, cam.y);
-      ctx.fillStyle = '#0e2230';
-      ctx.beginPath();
-      ctx.arc(0, 0, CAMERA.radius + 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = cam.seeing > 0 ? '#ff5a52' : PALETTE.camera;
-      ctx.beginPath();
-      ctx.arc(0, 0, CAMERA.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.rotate(cam.angle);
-      ctx.fillStyle = '#06222b';
-      ctx.beginPath();
-      ctx.moveTo(CAMERA.radius + 4, 0);
-      ctx.lineTo(2, -5);
-      ctx.lineTo(2, 5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-      // A blinking red dot while the camera has the thief in frame.
-      if (cam.seeing > 0) {
-        ctx.save();
-        ctx.translate(cam.ox, cam.oy - 20);
-        ctx.fillStyle = Math.sin(state.time * 10) > 0 ? PALETTE.danger : PALETTE.text;
-        ctx.font = `700 15px ${FONT}`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('!', 0, 0);
-        ctx.restore();
+function drawFloor(ctx, sim) {
+  const level = sim.level;
+  for (let y = 0; y < level.rows; y++) {
+    for (let x = 0; x < level.cols; x++) {
+      const px = x * T;
+      const py = y * T;
+      const ch = level.grid[y][x];
+      if (ch === '#') continue;
+      ctx.fillStyle = (x + y) % 2 === 0 ? PALETTE.floorA : PALETTE.floorB;
+      ctx.fillRect(px, py, T, T);
+      ctx.strokeStyle = PALETTE.floorLine;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, T - 1, T - 1);
+      if (ch === ',') {
+        ctx.fillStyle = PALETTE.shadow;
+        ctx.globalAlpha = 0.72;
+        ctx.fillRect(px + 2, py + 2, T - 4, T - 4);
+        ctx.globalAlpha = 1;
       }
     }
   }
+}
 
-  function drawGuards(state) {
-    for (const g of state.guards) {
-      ctx.save();
-      ctx.translate(g.x, g.y);
-      ctx.fillStyle = g.state === G_ALERT ? PALETTE.guard : PALETTE.guardCalm;
-      ctx.beginPath();
-      ctx.arc(0, 0, GUARD.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#1a1210';
-      ctx.beginPath();
-      ctx.arc(0, 0, GUARD.radius - 4, 0, Math.PI * 2);
-      ctx.fill();
-      // Facing wedge.
-      ctx.rotate(g.angle);
-      ctx.fillStyle = g.state === G_ALERT ? '#ff8a84' : '#ffe1a1';
-      ctx.beginPath();
-      ctx.moveTo(GUARD.radius - 2, 0);
-      ctx.lineTo(2, -6);
-      ctx.lineTo(2, 6);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-      // '?' while suspicious, '!' while alert; a suspicion arc fills overhead.
-      if (g.suspicion > 0.05) {
-        ctx.save();
-        ctx.translate(g.x, g.y - 24);
-        ctx.fillStyle = g.state === G_ALERT ? PALETTE.danger : PALETTE.loot;
-        ctx.font = `700 16px ${FONT}`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(g.state === G_ALERT ? '!' : '?', 0, 0);
-        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-        ctx.lineWidth = 3;
+function drawWallsAndCases(ctx, sim) {
+  const level = sim.level;
+  for (let y = 0; y < level.rows; y++) {
+    for (let x = 0; x < level.cols; x++) {
+      const ch = level.grid[y][x];
+      const px = x * T;
+      const py = y * T;
+      if (ch === '#') {
+        ctx.fillStyle = PALETTE.wall;
+        ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = PALETTE.wallTop;
+        ctx.fillRect(px, py, T, 4);
+      } else if (ch === 'D') {
+        ctx.fillStyle = PALETTE.caseFrame;
+        ctx.fillRect(px + 4, py + 4, T - 8, T - 8);
+        ctx.fillStyle = PALETTE.caseGlass;
+        ctx.globalAlpha = 0.55;
+        ctx.fillRect(px + 8, py + 8, T - 16, T - 16);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = PALETTE.lootSmall;
         ctx.beginPath();
-        ctx.arc(0, 0, 12, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2);
-        ctx.stroke();
-        ctx.strokeStyle = g.state === G_ALERT ? PALETTE.danger : PALETTE.loot;
-        ctx.beginPath();
-        ctx.arc(0, 0, 12, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * g.suspicion);
-        ctx.stroke();
-        ctx.restore();
+        ctx.arc(px + T / 2, py + T / 2, 4, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
   }
+}
 
-  function drawPlayer(state) {
-    const p = state.player;
+function drawLoot(ctx, sim) {
+  for (const item of sim.level.loot) {
+    if (item.taken) continue;
+    const pulse = 1 + Math.sin(sim.time * 3 + item.x) * 0.12;
     ctx.save();
-    ctx.translate(p.x, p.y);
-    if (p.hidden) {
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = PALETTE.shadowLeaf2;
-      ctx.beginPath();
-      ctx.arc(0, 0, 18, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-    ctx.fillStyle = PALETTE.playerDark;
-    ctx.beginPath();
-    ctx.arc(0, 0, 13, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = PALETTE.player;
-    ctx.beginPath();
-    ctx.arc(0, 0, 9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.rotate(p.face);
-    ctx.fillStyle = '#3a2a05';
-    ctx.beginPath();
-    ctx.moveTo(11, 0);
-    ctx.lineTo(1, -5);
-    ctx.lineTo(1, 5);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-    // Noise rings from running feet and landing coins.
-    for (const n of state.noises) {
-      ctx.strokeStyle = `rgba(255, 220, 120, ${0.5 * n.life})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    if (state.coinFlight) {
-      const c = state.coinFlight;
-      ctx.fillStyle = PALETTE.loot;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y - Math.sin(c.t * Math.PI) * 14, 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  function panel(x, y, w, h) {
-    ctx.fillStyle = 'rgba(10, 14, 24, 0.82)';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = 'rgba(120, 140, 180, 0.35)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-  }
-
-  function drawHud(state, best) {
-    const taken = state.loot.filter((i) => i.taken).length;
-    ctx.fillStyle = 'rgba(8, 11, 20, 0.78)';
-    ctx.fillRect(0, 0, FIELD.width, 44);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = `700 16px ${FONT}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(state.level.name, 14, 23);
-    ctx.font = `400 14px ${FONT}`;
-    ctx.fillStyle = PALETTE.muted;
-    ctx.fillText(state.level.brief, 14, 41);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = `700 15px ${FONT}`;
-    ctx.fillText(`LOOT ${taken}/${state.loot.length}`, FIELD.width / 2 - 130, 23);
-    ctx.fillText(`COINS ${state.coins}`, FIELD.width / 2 - 30, 23);
-    ctx.fillText(`SCORE ${state.score}`, FIELD.width / 2 + 70, 23);
-    ctx.fillText(`BEST ${Math.max(best, state.score)}`, FIELD.width / 2 + 175, 23);
-    // Lives as hearts.
-    ctx.textAlign = 'right';
-    ctx.fillStyle = PALETTE.danger;
-    ctx.font = `700 17px ${FONT}`;
-    ctx.fillText('♥'.repeat(state.lives) + '♡'.repeat(Math.max(0, 3 - state.lives)), FIELD.width - 14, 23);
-    // The alarm meter: a labelled bar that fills as guards grow suspicious or a
-    // camera holds the thief in frame. Full means lockdown — every guard hunts.
-    const bx = FIELD.width - 210;
-    const by = 58;
-    ctx.textAlign = 'left';
-    ctx.font = `700 13px ${FONT}`;
-    ctx.fillStyle = state.alarm > 0.6 ? PALETTE.danger : state.alarm > 0.25 ? PALETTE.loot : PALETTE.muted;
-    ctx.fillText('ALARM', bx, by + 8);
-    ctx.fillStyle = 'rgba(8, 11, 20, 0.78)';
-    ctx.fillRect(bx + 58, by, 140, 16);
-    ctx.strokeStyle = state.alarm > 0.6 ? PALETTE.danger : 'rgba(255,255,255,0.3)';
+    ctx.translate(item.x, item.y);
+    ctx.rotate(Math.PI / 4);
+    const size = (item.kind === 'vault' ? 15 : item.kind === 'big' ? 11 : 8) * pulse;
+    ctx.fillStyle = item.kind === 'vault' ? PALETTE.vault : item.kind === 'big' ? PALETTE.lootBig : PALETTE.lootSmall;
+    ctx.fillRect(-size / 2, -size / 2, size, size);
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
     ctx.lineWidth = 1.5;
-    ctx.strokeRect(bx + 58.5, by + 0.5, 139, 15);
-    if (state.alarm > 0.02) {
-      ctx.fillStyle = state.alarm > 0.6 ? PALETTE.danger : state.alarm > 0.25 ? PALETTE.loot : PALETTE.camera;
-      ctx.fillRect(bx + 60, by + 2, 136 * Math.min(1, state.alarm), 12);
+    ctx.strokeRect(-size / 2, -size / 2, size, size);
+    ctx.restore();
+    if (item.kind === 'vault') {
+      ctx.fillStyle = PALETTE.hudText;
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('VAULT', item.x, item.y - 22);
     }
-    // Objective line under the bar.
+  }
+}
+
+function drawVan(ctx, sim) {
+  const van = sim.level.van;
+  const glow = sim.exitOpen ? 0.5 + Math.sin(sim.time * 5) * 0.3 : 0.12;
+  ctx.save();
+  ctx.translate(van.x, van.y);
+  ctx.globalAlpha = glow;
+  ctx.fillStyle = PALETTE.van;
+  ctx.beginPath();
+  ctx.arc(0, 0, 30, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = sim.exitOpen ? PALETTE.van : PALETTE.vanDark;
+  ctx.beginPath();
+  ctx.roundRect(-20, -13, 40, 26, 6);
+  ctx.fill();
+  ctx.fillStyle = '#0d1120';
+  ctx.fillRect(8, -9, 9, 18);
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = 'bold 10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(sim.exitOpen ? 'GO!' : 'VAN', 0, 26);
+  ctx.restore();
+}
+
+function drawCoins(ctx, sim) {
+  for (const coin of sim.coins) {
+    ctx.fillStyle = PALETTE.lootSmall;
+    ctx.beginPath();
+    ctx.arc(coin.x, coin.y, coin.landed ? 4 : 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (!coin.landed) {
+      ctx.strokeStyle = 'rgba(255,211,77,0.5)';
+      ctx.beginPath();
+      ctx.moveTo(coin.fromX, coin.fromY);
+      ctx.lineTo(coin.x, coin.y);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawCone(ctx, sim, x, y, angle, halfAngle, distance, fill, edge) {
+  const pts = coneFan(sim.level, x, y, angle, halfAngle, distance, 22);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  for (const p of pts) ctx.lineTo(p.x, p.y);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = edge;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawGuards(ctx, sim) {
+  for (const guard of sim.guards) {
+    drawCone(
+      ctx,
+      sim,
+      guard.x,
+      guard.y,
+      guard.dir,
+      SETTINGS.guard.halfAngle,
+      SETTINGS.guard.viewDistance,
+      PALETTE.coneGuard,
+      PALETTE.coneGuardEdge,
+    );
+  }
+  for (const guard of sim.guards) {
+    ctx.fillStyle = guard.state === 'chase' ? '#ff2e4d' : PALETTE.guard;
+    ctx.beginPath();
+    ctx.arc(guard.x, guard.y, SETTINGS.guard.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = PALETTE.guardDark;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(guard.x, guard.y);
+    ctx.lineTo(guard.x + Math.cos(guard.dir) * 18, guard.y + Math.sin(guard.dir) * 18);
+    ctx.stroke();
+    if (guard.state === 'chase') {
+      ctx.fillStyle = '#ff2e4d';
+      ctx.font = 'bold 20px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', guard.x, guard.y - 20);
+    } else if (guard.suspicion > 0.35) {
+      ctx.fillStyle = PALETTE.lootSmall;
+      ctx.font = 'bold 18px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('?', guard.x, guard.y - 20);
+      ctx.fillStyle = 'rgba(255,211,77,0.8)';
+      ctx.fillRect(guard.x - 14, guard.y - 30, 28 * Math.min(1, guard.suspicion), 3);
+    }
+  }
+}
+
+function drawCameras(ctx, sim) {
+  for (const camera of sim.cameras) {
+    drawCone(
+      ctx,
+      sim,
+      camera.x,
+      camera.y,
+      camera.angle,
+      SETTINGS.camera.halfAngle,
+      SETTINGS.camera.viewDistance,
+      PALETTE.coneCamera,
+      PALETTE.coneCameraEdge,
+    );
+  }
+  for (const camera of sim.cameras) {
+    ctx.save();
+    ctx.translate(camera.x, camera.y);
+    ctx.rotate(camera.angle);
+    ctx.fillStyle = PALETTE.cameraBody;
+    ctx.beginPath();
+    ctx.roundRect(-6, -6, 16, 12, 3);
+    ctx.fill();
+    ctx.fillStyle = '#0d1120';
+    ctx.beginPath();
+    ctx.arc(10, 0, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawThief(ctx, sim) {
+  const t = sim.thief;
+  const bob = t.moving ? Math.sin(sim.time * 12) * 1.5 : 0;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(t.x, t.y + 12, 12, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = PALETTE.thief;
+  ctx.beginPath();
+  ctx.arc(t.x, t.y + bob, SETTINGS.thief.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = PALETTE.thiefDark;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(t.x, t.y + bob);
+  ctx.lineTo(t.x + Math.cos(t.dir) * 17, t.y + bob + Math.sin(t.dir) * 17);
+  ctx.stroke();
+  ctx.fillStyle = '#0d1120';
+  ctx.beginPath();
+  ctx.arc(t.x - 4, t.y + bob - 3, 2, 0, Math.PI * 2);
+  ctx.arc(t.x + 4, t.y + bob - 3, 2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawHud(ctx, sim) {
+  ctx.fillStyle = 'rgba(5, 7, 15, 0.82)';
+  ctx.fillRect(0, 0, W, 34);
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = 'bold 15px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE ' + sim.score, 12, 22);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText(sim.level.name.toUpperCase() + '  ·  LEVEL ' + (sim.levelIndex + 1) + '/3', W / 2, 21);
+  ctx.textAlign = 'right';
+  ctx.fillText('♥'.repeat(Math.max(0, sim.lives)) + '  COINS ' + sim.coinCount, W - 12, 22);
+
+  const bw = 260;
+  const bx = W / 2 - bw / 2;
+  const by = 40;
+  ctx.fillStyle = PALETTE.alarmBack;
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, 12, 6);
+  ctx.fill();
+  const alarm = sim.alarm;
+  const flashing = alarm > 0.75 && Math.sin(sim.time * 10) > 0;
+  ctx.fillStyle = flashing ? '#ff8fa3' : PALETTE.alarmFill;
+  if (alarm > 0.01) {
+    ctx.beginPath();
+    ctx.roundRect(bx, by, Math.max(12, bw * alarm), 12, 6);
+    ctx.fill();
+  }
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(sim.lockdownT > 0 ? 'LOCKDOWN' : 'ALARM', W / 2, by + 26);
+
+  if (!sim.everSeen && sim.state === 'playing') {
+    ctx.fillStyle = PALETTE.ok;
+    ctx.font = 'bold 12px system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.font = `400 14px ${FONT}`;
-    ctx.fillStyle = state.exitOpen ? PALETTE.exitOpen : PALETTE.muted;
-    const objective = state.exitOpen
-      ? 'Van is waiting — get out unseen.'
-      : taken < state.loot.length
-        ? `Grab the loot (${taken}/${state.loot.length}), then reach the van.`
-        : 'Reach the van.';
-    ctx.fillText(objective, 14, 62);
-    if (state.player.hidden) {
-      ctx.fillStyle = PALETTE.player;
-      ctx.font = `700 14px ${FONT}`;
-      ctx.fillText('HIDDEN in the shadows', 14, 84);
-    }
-    ctx.textAlign = 'right';
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = `400 13px ${FONT}`;
-    const mins = Math.floor(state.levelTime / 60);
-    const secs = Math.floor(state.levelTime % 60);
-    ctx.fillText(`${mins}:${String(secs).padStart(2, '0')}`, FIELD.width - 14, 84);
-    ctx.fillText('WASD move · Shift run · Click: throw coin · P pause · M mute', FIELD.width - 14, FIELD.height - 12);
+    ctx.fillText('GHOST', 12, 58);
   }
-
-  function drawTitle(state, best) {
-    panel(FIELD.width / 2 - 330, 150, 660, 330);
+  if (sim.banner) {
+    ctx.fillStyle = sim.banner.includes('LOCKDOWN') || sim.banner.includes('CAUGHT') ? PALETTE.banner : PALETTE.title;
+    ctx.font = 'bold 26px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = PALETTE.player;
-    ctx.font = `800 64px ${FONT}`;
-    ctx.fillText('VAULTBREAK', FIELD.width / 2, 230);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = `400 20px ${FONT}`;
-    ctx.fillText('A midnight bank heist in three levels', FIELD.width / 2, 268);
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = `400 16px ${FONT}`;
-    ctx.fillText('Slip past the guards and the cameras. Grab the loot. Reach the van.', FIELD.width / 2, 300);
-    ctx.fillText('Shadows hide you. Display cases block their sight. Coins buy you room.', FIELD.width / 2, 326);
-    ctx.fillText('Cameras fill the alarm meter — a full meter means lockdown.', FIELD.width / 2, 352);
-    ctx.fillStyle = PALETTE.loot;
-    ctx.font = `700 19px ${FONT}`;
-    ctx.fillText('Press SPACE or click to start', FIELD.width / 2, 402);
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = `400 14px ${FONT}`;
-    ctx.fillText(`Best score: ${best}    ·    WASD / arrows to move · Shift to run · Click to throw a coin`, FIELD.width / 2, 440);
+    ctx.fillText(sim.banner, W / 2, 110);
   }
+}
 
-  function drawCenter(title, lines, accent) {
-    panel(FIELD.width / 2 - 300, 220, 600, 240);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = accent;
-    ctx.font = `800 40px ${FONT}`;
-    ctx.fillText(title, FIELD.width / 2, 278);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = `400 18px ${FONT}`;
-    lines.forEach((line, i) => ctx.fillText(line, FIELD.width / 2, 318 + i * 28));
+function centerBox(ctx, title, lines, accent) {
+  ctx.fillStyle = 'rgba(5, 7, 15, 0.78)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = accent || PALETTE.title;
+  ctx.font = 'bold 52px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, W / 2, H / 2 - 60);
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = '17px system-ui, sans-serif';
+  lines.forEach((line, i) => {
+    ctx.fillText(line, W / 2, H / 2 - 16 + i * 26);
+  });
+}
+
+export function drawScene(ctx, sim) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#05070f';
+  ctx.fillRect(0, 0, W, H);
+  drawFloor(ctx, sim);
+  drawLoot(ctx, sim);
+  drawVan(ctx, sim);
+  drawCameras(ctx, sim);
+  drawGuards(ctx, sim);
+  drawCoins(ctx, sim);
+  drawThief(ctx, sim);
+  drawWallsAndCases(ctx, sim);
+  drawHud(ctx, sim);
+
+  if (sim.state === 'title') {
+    centerBox(
+      ctx,
+      'VAULTBREAK',
+      [
+        sim.level.name + ' — ' + sim.level.sub,
+        'WASD / arrows to move · Shift to run · click to throw a coin',
+        'Grab the vault, reach the green van. Stay out of the cones.',
+        'Press ENTER or click to start the heist',
+      ],
+      PALETTE.title,
+    );
+  } else if (sim.state === 'caught') {
+    centerBox(ctx, 'CAUGHT!', ['A guard grabbed you. ' + sim.lives + ' lives left.', ''], PALETTE.banner);
+  } else if (sim.state === 'clear') {
+    centerBox(
+      ctx,
+      'LEVEL CLEAR',
+      [
+        'Score: ' + sim.score,
+        sim.everSeen ? 'Spotted — no ghost bonus this time.' : 'GHOST — never seen. +500 bonus banked.',
+        'Next floor loading…',
+      ],
+      PALETTE.ok,
+    );
+  } else if (sim.state === 'gameover') {
+    centerBox(
+      ctx,
+      'GAME OVER',
+      ['The crew got pinched. Final score: ' + sim.score, 'Press R to run it back.'],
+      PALETTE.banner,
+    );
+  } else if (sim.state === 'won') {
+    centerBox(
+      ctx,
+      'THE PERFECT HEIST',
+      [
+        'All three vaults cracked. Final score: ' + sim.score,
+        sim.everSeen ? 'A clean getaway, mostly.' : 'GHOST RUN — never seen once. Legendary.',
+        'Press R to play again.',
+      ],
+      PALETTE.ok,
+    );
   }
-
-  function draw(state, screen, best) {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = PALETTE.backdrop;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
-    if (state.shake > 0) {
-      const s = state.shake * 22;
-      ctx.translate((Math.random() - 0.5) * s, (Math.random() - 0.5) * s);
-    }
-    drawLevel(state);
-    drawCones(state);
-    drawGuards(state);
-    drawPlayer(state);
-    if (screen === SCREEN_TITLE) {
-      drawHud(state, best);
-      drawTitle(state, best);
-    } else if (screen === SCREEN_PLAY) {
-      drawHud(state, best);
-    } else if (screen === SCREEN_PAUSED) {
-      drawHud(state, best);
-      drawCenter('PAUSED', ['Press P or click to keep sneaking.'], PALETTE.text);
-    } else if (screen === SCREEN_CAUGHT) {
-      drawHud(state, best);
-      drawCenter('CAUGHT!', state.lives > 0
-        ? [`A guard got you. ${state.lives} ${state.lives === 1 ? 'life' : 'lives'} left.`, 'Press SPACE to try the level again.']
-        : ['No lives left.', 'Press SPACE to try again.'], PALETTE.danger);
-    } else if (screen === SCREEN_CLEAR) {
-      drawHud(state, best);
-      drawCenter('LEVEL CLEAR', [
-        `Score ${state.score} · ${state.ghost ? 'GHOST — never spotted (+500).' : 'Spotted, but you made it out.'}`,
-        state.levelIndex + 1 < 3 ? 'Press SPACE for the next level.' : 'Press SPACE to finish.',
-      ], PALETTE.exitOpen);
-    } else if (screen === SCREEN_OVER) {
-      drawHud(state, best);
-      drawCenter('GAME OVER', [`Score ${state.score}. Best ${Math.max(best, state.score)}.`, 'Press SPACE to start over.'], PALETTE.danger);
-    } else if (screen === SCREEN_WIN) {
-      drawHud(state, best);
-      drawCenter('ALL CLEAR — GHOST', [
-        `You stole every haul and vanished. Final score ${state.score}.`,
-        'Press SPACE to run it again.',
-      ], PALETTE.player);
-    }
-    // Camera mounts sit on the top/bottom wall rows, under the HUD bar: paint them
-    // last so they stay visible.
-    drawCameras(state);
-  }
-
-  return { draw, toField };
 }

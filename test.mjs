@@ -1,158 +1,240 @@
-// VAULTBREAK headless checks (node test.mjs). No browser needed: the world
-// simulation is pure JS, so Node can drive it straight.
-//   1. syntax: every game module parses (node --check does this separately)
-//   2. chaos: 120s of random steering + running + coin throws, no crash, no NaN
-//   3. autopilot: BFS drive through level 1 loot -> van clears the level
-//   4. lockdown: park the thief in a camera cone until the meter trips
-//   5. coin: a thrown coin lands, makes noise, spends one coin
-//   6. caught: a guard placed on the thief catches them, lives drop, retry works
-import { createRandom } from './game/src/random.js';
+// VAULTBREAK tests — run with `node test.mjs`, exit 0 when everything passes.
+// Pure Node: no DOM, no canvas, no network. The sim is driven headlessly.
+
+import { strict as assert } from 'node:assert';
+import { SETTINGS } from './game/src/config.js';
+import { makeRng, hashSeed } from './game/src/random.js';
+import { makeHeadlessInput } from './game/src/input.js';
 import {
-  createWorld, findPath, EVENT_CAUGHT, EVENT_CLEAR, EVENT_COIN, EVENT_LOCKDOWN,
-  EVENT_LOOT, EVENT_OVER, G_ALERT,
+  LEVELS,
+  buildLevel,
+  tileAt,
+  tileCenter,
+  reachableTiles,
 } from './game/src/world.js';
-import { STEP, TILE, LEVELS } from './game/src/config.js';
+import { createSim, startRun, stepSim, thiefHidden } from './game/src/sim.js';
+import { stageScene } from './game/src/shots.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
-  if (!ok) failures += 1;
-}
-function saneNumber(n) { return typeof n === 'number' && Number.isFinite(n); }
-function worldSane(w) {
-  const s = w.state;
-  return saneNumber(s.player.x) && saneNumber(s.player.y)
-    && s.guards.every((g) => saneNumber(g.x) && saneNumber(g.y) && saneNumber(g.suspicion))
-    && s.cameras.every((c) => saneNumber(c.angle) && saneNumber(c.seeing))
-    && saneNumber(s.alarm) && saneNumber(s.camAlarm) && saneNumber(s.score);
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed += 1;
+  console.log('ok - ' + name);
 }
 
-// 2. Chaos: 120 seconds of random input.
-{
-  const w = createWorld(createRandom(7));
-  const rng = createRandom(99);
-  let events = 0;
-  let steps = 0;
-  for (let t = 0; t < 120; t += STEP) {
-    const ang = rng() * Math.PI * 2;
-    const move = rng() < 0.7 ? { x: Math.cos(ang), y: Math.sin(ang) } : { x: 0, y: 0 };
-    const run = rng() < 0.3;
-    const throwAt = rng() < 0.02 ? { x: rng() * 1280, y: rng() * 720 } : null;
-    events |= w.step(STEP, move, run, throwAt);
-    steps += 1;
-    if (w.state.cleared || w.state.lives <= 0) { w.reset(); }
+function tileOf(level, px, py) {
+  return { cx: Math.floor(px / SETTINGS.tile), cy: Math.floor(py / SETTINGS.tile) };
+}
+
+check('three levels parse and are rectangular with all required pieces', () => {
+  assert.equal(LEVELS.length, 3);
+  for (const def of LEVELS) {
+    const level = buildLevel(def);
+    assert.equal(level.rows, 15);
+    assert.equal(level.cols, 24);
+    assert.ok(level.thiefStart);
+    assert.ok(level.van);
+    assert.ok(level.vault);
+    assert.ok(level.loot.length >= 3);
+    assert.equal(level.guardSpawns.length, def.guardRoutes.length);
+    assert.equal(level.cameraMounts.length, def.cameraSpecs.length);
   }
-  check('chaos 120s: no crash, world stays sane', worldSane(w), `${steps} steps, events=${events}`);
-}
+});
 
-// 3. Autopilot clears level 1: loot then van.
-{
-  const w = createWorld(createRandom(1));
-  const s = w.state;
-  const driveTo = (tx, ty, maxSeconds) => {
-    let path = [];
-    for (let t = 0; t < maxSeconds / STEP; t += 1) {
-      if (s.cleared || s.caught) return;
-      if (path.length === 0) {
-        path = findPath(s.level, s.player.x, s.player.y, tx * TILE + 20, ty * TILE + 20);
-        if (path.length === 0) return;
+check('every loot, vault, van and guard waypoint is reachable from the thief start', () => {
+  for (const def of LEVELS) {
+    const level = buildLevel(def);
+    const start = tileOf(level, level.thiefStart.x, level.thiefStart.y);
+    const reached = reachableTiles(level, start.cx, start.cy);
+    const key = (x, y) => Math.floor(x / SETTINGS.tile) + ',' + Math.floor(y / SETTINGS.tile);
+    for (const item of level.loot) {
+      assert.ok(reached.has(key(item.x, item.y)), def.name + ' loot unreachable at ' + item.x + ',' + item.y);
+    }
+    assert.ok(reached.has(key(level.van.x, level.van.y)), def.name + ' van unreachable');
+    for (const route of def.guardRoutes) {
+      for (const wp of route) {
+        assert.ok(reached.has(wp.cx + ',' + wp.cy), def.name + ' waypoint unreachable at ' + wp.cx + ',' + wp.cy);
       }
-      const next = path[0];
-      const dx = next.x - s.player.x;
-      const dy = next.y - s.player.y;
-      const d = Math.hypot(dx, dy);
-      if (d < 6) { path.shift(); continue; }
-      // Wait out a suspicious guard instead of walking into its cone.
-      const hot = s.guards.some((g) => g.suspicion > 0.12 || Math.hypot(g.x - s.player.x, g.y - s.player.y) < 110);
-      if (hot) { w.step(STEP, { x: 0, y: 0 }, false, null); continue; }
-      w.step(STEP, { x: dx / d, y: dy / d }, false, null);
-    }
-  };
-  driveTo(25, 1, 60);
-  const lootTaken = s.loot.filter((i) => i.taken).length;
-  driveTo(27, 16, 90);
-  check('autopilot level 1: loot taken then exit reached', s.cleared && lootTaken === s.loot.length,
-    `cleared=${s.cleared} loot=${lootTaken}/${s.loot.length} score=${s.score} lives=${s.lives}`);
-}
-
-// 4. Lockdown: stand in a camera cone until the meter trips.
-{
-  const w = createWorld(createRandom(1));
-  const s = w.state;
-  const cam = s.cameras[0];
-  // Stand 120px down-cone from the camera origin, in the open.
-  s.player.x = cam.ox;
-  s.player.y = cam.oy + 120;
-  let locked = false;
-  for (let t = 0; t < 30; t += STEP) {
-    const ev = w.step(STEP, { x: 0, y: 0 }, false, null);
-    if (ev & EVENT_LOCKDOWN) { locked = true; break; }
-  }
-  const allAlert = s.guards.every((g) => g.state === G_ALERT);
-  check('lockdown: full camera meter trips lockdown, all guards alert', locked && allAlert,
-    `locked=${locked} allAlert=${allAlert} camAlarm=${s.camAlarm.toFixed(2)}`);
-}
-
-// 5. Coin throw.
-{
-  const w = createWorld(createRandom(1));
-  const s = w.state;
-  const before = s.coins;
-  let coinEvent = false;
-  let noiseSeen = false;
-  const ev0 = w.step(STEP, { x: 0, y: 0 }, false, { x: s.player.x + 200, y: s.player.y });
-  if (ev0 & EVENT_COIN) coinEvent = true;
-  for (let t = 0; t < 2; t += STEP) {
-    const ev = w.step(STEP, { x: 0, y: 0 }, false, null);
-    if (ev & EVENT_COIN) coinEvent = true;
-    if (s.noises.length > 0) noiseSeen = true;
-  }
-  check('coin: thrown, lands with noise, spends one coin',
-    coinEvent && noiseSeen && s.coins === before - 1 && !s.coinFlight,
-    `coins ${before}->${s.coins}`);
-}
-
-// 6. Caught + retry.
-{
-  const w = createWorld(createRandom(1));
-  const s = w.state;
-  const g = s.guards[0];
-  g.state = G_ALERT;
-  g.suspicion = 1;
-  g.target = { x: s.player.x, y: s.player.y };
-  g.path = [{ x: s.player.x, y: s.player.y }];
-  let caughtEvent = false;
-  for (let t = 0; t < 5; t += STEP) {
-    const ev = w.step(STEP, { x: 0, y: 0 }, false, null);
-    if (ev & EVENT_CAUGHT) { caughtEvent = true; break; }
-  }
-  const livesAfter = s.lives;
-  w.retryLevel();
-  check('caught: guard catches thief, life lost, retry reloads level',
-    caughtEvent && livesAfter === 2 && !w.state.caught && w.state.levelIndex === 0,
-    `caught=${caughtEvent} lives=${livesAfter} afterRetryCaught=${w.state.caught}`);
-}
-
-// 7. Every level parses and has the pieces it needs.
-{
-  let ok = true;
-  let detail = '';
-  for (let i = 0; i < LEVELS.length; i += 1) {
-    const w = createWorld(createRandom(1));
-    w.loadLevel(i);
-    const s = w.state;
-    const hasStart = s.player.x > 0 && s.player.y > 0;
-    const hasLoot = s.loot.length > 0;
-    const hasExit = s.exit.x > 0 && s.exit.y > 0;
-    const hasGuards = s.guards.length > 0;
-    const hasCams = s.cameras.length > 0;
-    if (!hasStart || !hasLoot || !hasExit || !hasGuards || !hasCams) {
-      ok = false;
-      detail += ` L${i + 1}: start=${hasStart} loot=${hasLoot} exit=${hasExit} guards=${hasGuards} cams=${hasCams}`;
     }
   }
-  check('levels: all 3 load with start, loot, exit, guards, cameras', ok, detail || '3/3 complete');
-}
+});
 
-console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+check('guard waypoints sit on walkable floor', () => {
+  for (const def of LEVELS) {
+    const level = buildLevel(def);
+    for (const route of def.guardRoutes) {
+      for (const wp of route) {
+        const ch = level.grid[wp.cy][wp.cx];
+        assert.ok(ch !== '#' && ch !== 'D', def.name + ' waypoint on ' + ch);
+      }
+    }
+  }
+});
+
+check('a guard spots the thief standing in its open cone', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const guard = sim.guards[0];
+  // Guard 0 spawns at tile (7,3); put the thief 80px east of it on open floor.
+  sim.thief.x = guard.x + 80;
+  sim.thief.y = guard.y;
+  guard.dir = 0;
+  guard.state = 'patrol';
+  for (let i = 0; i < 60; i++) stepSim(sim, 1 / 60);
+  assert.ok(guard.suspicion > 0.5, 'suspicion stayed ' + guard.suspicion);
+});
+
+check('a wall between guard and thief blocks the spot', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const guard = sim.guards[0];
+  // Thief west of the guard, behind the display case at tile (3,3).
+  sim.thief.x = guard.x - 200;
+  sim.thief.y = guard.y;
+  guard.dir = Math.PI;
+  guard.state = 'patrol';
+  guard.suspicion = 0;
+  for (let i = 0; i < 60; i++) stepSim(sim, 1 / 60);
+  assert.equal(guard.suspicion, 0);
+});
+
+check('a thief in shadow is invisible to a cone beyond spotting range', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const guard = sim.guards[0];
+  // Shadow tile (9,2); guard 0 is at (300,140) facing it.
+  const spot = tileCenter(9, 2);
+  sim.thief.x = spot.x;
+  sim.thief.y = spot.y;
+  assert.ok(thiefHidden(sim));
+  guard.dir = Math.atan2(spot.y - guard.y, spot.x - guard.x);
+  guard.state = 'patrol';
+  for (let i = 0; i < 60; i++) stepSim(sim, 1 / 60);
+  assert.equal(guard.suspicion, 0);
+});
+
+check('a camera in whose cone the thief stands raises the alarm', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const camera = sim.cameras[0];
+  // Camera 0 sits at tile (22,2) facing west; put the thief 200px west on open floor.
+  sim.thief.x = camera.x - 200;
+  sim.thief.y = camera.y;
+  assert.equal(tileAt(sim.level, sim.thief.x, sim.thief.y), '.');
+  for (let i = 0; i < 60; i++) stepSim(sim, 1 / 60);
+  assert.ok(sim.alarm > 0.3, 'alarm stayed ' + sim.alarm);
+});
+
+check('a full alarm trips lockdown and blocks the exit', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const camera = sim.cameras[0];
+  sim.thief.x = camera.x - 200;
+  sim.thief.y = camera.y;
+  sim.alarm = 0.99;
+  stepSim(sim, 1 / 60);
+  assert.ok(sim.lockdownT > 0, 'no lockdown at alarm ' + sim.alarm);
+  stepSim(sim, 1 / 60);
+  assert.equal(sim.guards[0].state, 'chase');
+  sim.exitOpen = true;
+  sim.thief.x = sim.level.van.x;
+  sim.thief.y = sim.level.van.y;
+  stepSim(sim, 1 / 60);
+  assert.equal(sim.state, 'playing', 'escaped during lockdown');
+});
+
+check('a thrown coin pulls a nearby guard to investigate', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const guard = sim.guards[0];
+  input.clickAt(guard.x + 30, guard.y);
+  for (let i = 0; i < 90; i++) stepSim(sim, 1 / 60);
+  assert.equal(sim.coinCount, SETTINGS.coins.perLevel - 1);
+  assert.ok(guard.state === 'investigate' || guard.state === 'search', 'guard state is ' + guard.state);
+});
+
+check('the van stays shut until the vault is cracked', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  sim.thief.x = sim.level.van.x;
+  sim.thief.y = sim.level.van.y;
+  stepSim(sim, 1 / 60);
+  assert.equal(sim.state, 'playing');
+  assert.equal(sim.exitOpen, false);
+  sim.thief.x = sim.level.vault.x;
+  sim.thief.y = sim.level.vault.y;
+  stepSim(sim, 1 / 60);
+  assert.equal(sim.vaultTaken, true);
+  assert.equal(sim.exitOpen, true);
+  sim.thief.x = sim.level.van.x;
+  sim.thief.y = sim.level.van.y;
+  stepSim(sim, 1 / 60);
+  assert.equal(sim.state, 'clear');
+});
+
+check('getting caught costs a life and respawns the thief', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 1, input, null);
+  startRun(sim);
+  const guard = sim.guards[0];
+  sim.thief.x = guard.x + 10;
+  sim.thief.y = guard.y;
+  stepSim(sim, 1 / 60);
+  assert.equal(sim.state, 'caught');
+  assert.equal(sim.lives, SETTINGS.run.lives - 1);
+  for (let i = 0; i < 120; i++) stepSim(sim, 1 / 60);
+  assert.equal(sim.state, 'playing');
+  assert.equal(sim.thief.x, sim.level.thiefStart.x);
+});
+
+check('shot scenes stage the expected states', () => {
+  const start = stageScene('start', 1);
+  assert.equal(start.state, 'title');
+  const play = stageScene('play', 1);
+  assert.equal(play.state, 'playing');
+  assert.ok(thiefHidden(play), 'play shot thief is not hidden');
+  const close = stageScene('close', 1);
+  assert.equal(close.state, 'playing');
+  assert.equal(close.alarm, 0.56);
+  const end = stageScene('end', 1);
+  assert.equal(end.state, 'clear');
+  assert.ok(end.score > 1000, 'end score ' + end.score);
+  assert.equal(end.everSeen, false);
+});
+
+check('the rng is deterministic for a fixed seed', () => {
+  const a = makeRng(hashSeed('vaultbreak-test'));
+  const b = makeRng(hashSeed('vaultbreak-test'));
+  for (let i = 0; i < 50; i++) assert.equal(a.next(), b.next());
+});
+
+check('120 seconds of random chaos never crashes the sim', () => {
+  const input = makeHeadlessInput();
+  const sim = createSim(0, 7, input, null);
+  startRun(sim);
+  const rng = makeRng(99);
+  const keys = ['KeyW', 'KeyA', 'KeyS', 'KeyD'];
+  for (let i = 0; i < 120 * 60; i++) {
+    if (i % 30 === 0) {
+      for (const k of keys) input.release(k);
+      input.press(keys[rng.int(keys.length)]);
+      if (rng.chance(0.3)) input.press('ShiftLeft');
+      else input.release('ShiftLeft');
+      if (rng.chance(0.05)) input.clickAt(rng.range(0, 960), rng.range(0, 600));
+    }
+    stepSim(sim, 1 / 60);
+    assert.ok(Number.isFinite(sim.thief.x) && Number.isFinite(sim.thief.y));
+    assert.ok(sim.alarm >= 0 && sim.alarm <= 1);
+    assert.ok(sim.lives >= 0 && sim.lives <= 3);
+  }
+  assert.ok(['playing', 'caught', 'clear', 'gameover', 'won'].includes(sim.state));
+});
+
+console.log('all ' + passed + ' tests passed');

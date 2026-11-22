@@ -1,199 +1,121 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed
-// 1/60 s steps (several in a slow frame, none in a fast one), and the renderer
-// paints what is there. The game moves between seven screens: title, play,
-// paused, caught, level clear, game over and victory.
-//
-// ?seed=N fixes the game. ?shot=start|play|close|end (with &seed=N) stages that
-// scene instead of running the loop, paints it twice and sets window.__shotReady
-// for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_CAUGHT, EVENT_CLEAR, EVENT_COIN, EVENT_LOCKDOWN, EVENT_LOOT, EVENT_OVER, EVENT_SPOTTED } from './world.js';
-import { ACTION_CONFIRM, ACTION_MUTE, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_CAUGHT, SCREEN_CLEAR, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN } from './render.js';
-import { stageShot } from './shots.js';
-import { sound } from './audio.js';
+// VAULTBREAK entry point — browser shell around the pure sim.
+// Owns the canvas, the frame loop, pause/mute/restart keys and the ?shot= scenes.
+// Importing this file in Node does nothing: the boot only runs when `document` exists.
 
-// The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed.
-const MAX_FRAME = 0.25;
+import { SETTINGS } from './config.js';
+import { createSim, startRun, stepSim } from './sim.js';
+import { drawScene } from './render.js';
+import { stageScene } from './shots.js';
+import { attachInput } from './input.js';
+import { SoundBank } from './audio.js';
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const W = SETTINGS.viewWidth;
+const H = SETTINGS.viewHeight;
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+function fitCanvas(canvas) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(window.innerWidth * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  return dpr;
+}
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
+function drawFrame(ctx, canvas, sim, dpr, paused) {
+  const cw = canvas.width / dpr;
+  const ch = canvas.height / dpr;
+  const scale = Math.min(cw / W, ch / H);
+  const ox = (cw - W * scale) / 2;
+  const oy = (ch - H * scale) / 2;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#05070f';
+  ctx.fillRect(0, 0, cw, ch);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  drawScene(ctx, sim);
+  if (paused) {
+    ctx.fillStyle = 'rgba(5, 7, 15, 0.6)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#e8ecf7';
+    ctx.font = 'bold 40px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('PAUSED — press P to resume', W / 2, H / 2);
   }
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
+export function bootGame(canvas, statusEl) {
+  const ctx = canvas.getContext('2d');
+  const params = new URLSearchParams(window.location.search);
+  const seed = Number(params.get('seed') || 1);
+  const shot = params.get('shot');
+  const input = attachInput(canvas);
+  const audio = new SoundBank();
+  let dpr = fitCanvas(canvas);
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas, (x, y) => renderer.toField(x, y));
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-  let spottedCooldown = 0;
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    sound.unlock();
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing ${world.state.level.name}. ${LIVES} lives. Grab the loot, reach the van unseen.`);
-  }
-
-  function handleEvents(events) {
-    if (events & EVENT_LOOT) {
-      sound.pickup();
-      announce(`Loot taken. ${world.state.loot.filter((i) => i.taken).length} of ${world.state.loot.length}.`);
-    }
-    if (events & EVENT_COIN) sound.coin();
-    if (events & EVENT_SPOTTED && spottedCooldown <= 0) {
-      sound.spotted();
-      spottedCooldown = 2;
-      announce('A guard is growing suspicious.');
-    }
-    if (events & EVENT_LOCKDOWN) {
-      sound.alarm();
-      announce('Lockdown! The cameras tripped the alarm — every guard is hunting.');
-    }
-    if (events & EVENT_CAUGHT) {
-      sound.caught();
-      if (world.state.lives > 0) {
-        screen = SCREEN_CAUGHT;
-        announce(`Caught. ${world.state.lives} lives left.`);
-      }
-    }
-    if (events & EVENT_CLEAR) {
-      if (world.state.won) {
-        sound.win();
-        screen = SCREEN_WIN;
-        if (world.state.score > best) {
-          best = world.state.score;
-          saveBest(best);
-        }
-        announce(`All clear. Final score ${world.state.score}.`);
-      } else {
-        sound.clear();
-        screen = SCREEN_CLEAR;
-        announce(`Level clear. Score ${world.state.score}.`);
-      }
-    }
-    if (events & EVENT_OVER) {
-      screen = SCREEN_OVER;
-      if (world.state.score > best) {
-        best = world.state.score;
-        saveBest(best);
-      }
-      announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-    }
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_MUTE) {
-      announce(sound.toggleMute() ? 'Sound off.' : 'Sound on.');
-    }
-    if (actions & ACTION_CONFIRM) {
-      sound.unlock();
-      if (screen === SCREEN_TITLE || screen === SCREEN_OVER || screen === SCREEN_WIN) startGame();
-      else if (screen === SCREEN_CAUGHT) {
-        if (world.state.lives > 0) {
-          world.retryLevel();
-          screen = SCREEN_PLAY;
-          announce('Trying the level again.');
-        } else startGame();
-      } else if (screen === SCREEN_CLEAR) {
-        world.nextLevel();
-        screen = SCREEN_PLAY;
-        announce(`Playing ${world.state.level.name}.`);
-      } else if (screen === SCREEN_PAUSED) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      }
-    }
-    if (actions & ACTION_PAUSE) {
-      if (screen === SCREEN_PLAY) {
-        screen = SCREEN_PAUSED;
-        announce('Paused.');
-      } else if (screen === SCREEN_PAUSED) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      }
-    }
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    spottedCooldown = Math.max(0, spottedCooldown - Math.min((now - last) / 1000, MAX_FRAME));
-    handleActions();
-    // A click during play throws a coin; anywhere else it just confirms.
-    const throwAt = screen === SCREEN_PLAY ? input.takeThrow() : (input.takeThrow(), null);
-    if (screen === SCREEN_TITLE) {
-      while (accumulator >= STEP) {
-        world.step(STEP, { x: 0, y: 0 }, false, null);
-        accumulator -= STEP;
-      }
-    } else if (screen === SCREEN_PLAY) {
-      while (accumulator >= STEP) {
-        const events = world.step(STEP, input.move(), input.running(), throwAt);
-        handleEvents(events);
-        accumulator -= STEP;
-        if (screen !== SCREEN_PLAY) break;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting guards patrol unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
+  window.addEventListener('resize', () => {
+    dpr = fitCanvas(canvas);
   });
 
-  announce('Vaultbreak. A heist game. Press Space or click to start.');
+  // Screenshot mode: stage one frozen scene and draw it, no loop.
+  if (shot) {
+    const sim = stageScene(shot, seed);
+    drawFrame(ctx, canvas, sim, dpr, false);
+    return { sim, mode: 'shot', scene: shot };
+  }
+
+  let sim = createSim(0, seed, input, audio);
+  let paused = false;
+  let last = performance.now();
+
+  function setStatus(text) {
+    if (statusEl) statusEl.textContent = text;
+  }
+
+  input.onKey = (code, down) => {
+    if (!down) return;
+    if (code === 'Enter') {
+      if (sim.state === 'title') {
+        audio.ensure();
+        audio.click();
+        startRun(sim);
+      }
+    }
+    if (code === 'KeyR') {
+      if (sim.state === 'gameover' || sim.state === 'won') {
+        sim = createSim(0, seed, input, audio);
+        startRun(sim);
+      }
+    }
+    if (code === 'KeyP') paused = !paused;
+    if (code === 'KeyM') audio.toggleMute();
+  };
+
+  // Clicking the title screen starts the run too.
+  const startOnClick = () => {
+    if (sim.state === 'title') {
+      audio.ensure();
+      audio.click();
+      startRun(sim);
+    }
+  };
+  canvas.addEventListener('mousedown', startOnClick);
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (!paused) stepSim(sim, dt);
+    drawFrame(ctx, canvas, sim, dpr, paused);
+    setStatus(
+      'VAULTBREAK level ' + (sim.levelIndex + 1) + ' of 3, score ' + sim.score +
+        ', lives ' + sim.lives + ', alarm ' + Math.round(sim.alarm * 100) + ' percent, ' + sim.state,
+    );
+    requestAnimationFrame(frame);
+  }
   requestAnimationFrame(frame);
+  return { get sim() { return sim; }, mode: 'play' };
 }
 
-if (shot) runShot(shot);
-else runGame();
+if (typeof document !== 'undefined') {
+  const canvas = document.getElementById('game');
+  const statusEl = document.getElementById('status');
+  if (canvas) bootGame(canvas, statusEl);
+}
